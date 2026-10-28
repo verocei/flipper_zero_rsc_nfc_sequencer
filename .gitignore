@@ -1,0 +1,6 @@
+# ufbt build output and generated editor config
+dist/
+.vscode/
+.ufbt/
+*.fap
+*.elf

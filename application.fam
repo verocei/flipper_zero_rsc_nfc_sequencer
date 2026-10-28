@@ -1,0 +1,16 @@
+App(
+    appid="rsc_nfc_sequencer",
+    name="RSC NFC Sequencer",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="rsc_nfc_sequencer_app",
+    # The NFC listener runs on its own thread, but sorting + storage work
+    # happens on the app thread, so give it room. Lower to 4*1024 if tight.
+    stack_size=8 * 1024,
+    requires=["gui", "storage"],
+    fap_category="NFC",
+    fap_author="Athos / RSC",
+    fap_version="0.1",
+    fap_description="Sequential / alphabetical / random UID emulation for access-control testing",
+    # No custom icon on purpose — if ufbt complains, drop a 10x10 1-bit PNG
+    # next to this file and add:  fap_icon="icon.png",
+)
