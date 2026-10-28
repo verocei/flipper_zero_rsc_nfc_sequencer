@@ -6,6 +6,8 @@ unattended.
 
 Runs on **stock (OFW)** and **Momentum** firmware (shared OFW NFC API only).
 
+> Magyar használati útmutató: [HASZNALAT.md](HASZNALAT.md).
+
 ## Build
 
 ```bash
@@ -55,15 +57,46 @@ copy the matching `.fap` to each device (`/ext/apps/NFC/`).
 The app opens on a menu (the app name is the menu header):
 
 - **Start** — begin emulating; the screen shows the current tag name (large)
-  and its UID, the mode/delay/position, and a countdown. **OK** or **Back**
-  stops and returns to the menu.
+  and its UID, plus a counter. **OK** or **Back** stops and returns to the menu.
 - **Settings** — a scrolling list; **←/→** changes a value, **Back** saves and
   returns. Settings persist across launches.
-  - **Mode**: SEQ (directory order) · ABC (alphabetical) · RND (random each step)
-  - **Delay**: 1–60 s per tag
+- **Generate tags** — create random test tags (see below).
+- **Delete generated** — remove every `GEN-*.nfc` from the app folder (asks first).
 - **About** — short info.
 
-The blue LED blinks on every tag change.
+### Settings
+
+- **Order**: SEQ (directory order) · ABC (alphabetical) · RND (random each step)
+- **Timing** — each code is presented for the **Hold** time (field on), then the
+  field drops, so a reader sees each code once (like a tap) instead of reading the
+  same one repeatedly.
+  - **Fixed** — a code every **Delay** seconds (1–60); **Delay** is the time
+    between taps.
+  - **Burst** — **Codes/period** codes per **Period**, at random moments, but
+    never closer together than **Min gap**.
+- **Hold** — how long each code is transmitted (0.1–1 s). Both modes.
+- **Total** — stop after N emissions (Off = run forever).
+- **Source** — ←/→ selects where tags come from:
+  - **App** — the app's own `tags/` folder (your own / sample tags).
+  - **Generated** — the `tags/generated/` subfolder (the `GEN-*.nfc` files).
+  - a **folder name** — a folder you picked. Press **OK** on this row to open the
+    file browser; the chosen file's folder becomes the custom source.
+- **LED** — Off, or Red / Green / Blue / Yellow / Cyan / Magenta / White. The LED
+  stays lit for as long as the tag is being emulated (continuously in Fixed mode,
+  during each brief presentation in Burst mode), and turns red if a tag fails to
+  load. (A steady LED while on USB is the charge indicator, not this app.)
+- **Vibro** — Off / On: a short buzz on each emission.
+- **Beep** — Off / On: a short beep on each emission (lower tone on a load error).
+
+## Generate tags
+
+**Menu → Generate tags.** Set the count (←/→ or ↑/↓: tap +1, hold +5, longer
+hold +10, up to 100), then **OK**. The app writes `GEN-1.nfc`, `GEN-2.nfc`, …
+with random 4-byte ISO14443-3A UIDs into the **`tags/generated/`** subfolder,
+continuing the numbering so nothing is overwritten, shows a confirmation, and
+sets **Source → Generated**. **Delete generated** removes them again. Generation
+and deletion only ever touch the app's own folder, never a folder you picked
+under **Source**.
 
 ## Scope / known limits
 

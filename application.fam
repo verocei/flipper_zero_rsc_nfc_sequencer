@@ -6,10 +6,10 @@ App(
     # The NFC listener runs on its own thread, but sorting + storage work
     # happens on the app thread, so give it room. Lower to 4*1024 if tight.
     stack_size=8 * 1024,
-    requires=["gui", "storage"],
+    requires=["gui", "storage", "dialogs"],
     fap_category="NFC",
     fap_author="Athos / RSC",
-    fap_version="0.2",
+    fap_version="0.3",
     fap_description="Sequential / alphabetical / random UID emulation for access-control testing",
     fap_icon="icon_10px.png", # 10x10 1-bit NFC contactless-waves icon
 )
