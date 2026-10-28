@@ -52,18 +52,18 @@ copy the matching `.fap` to each device (`/ext/apps/NFC/`).
 
 ## Use
 
-| Key        | When stopped            | When running |
-|------------|-------------------------|--------------|
-| ← / →      | change mode SEQ/ABC/RND | —            |
-| ↑ / ↓      | delay +/- 1 s (1–60)    | —            |
-| OK         | start                   | stop         |
-| Back       | exit                    | stop         |
+The app opens on a menu (the app name is the menu header):
 
-- **SEQ** — directory order
-- **ABC** — alphabetical by file name
-- **RND** — random pick each step
+- **Start** — begin emulating; the screen shows the current tag name (large)
+  and its UID, the mode/delay/position, and a countdown. **OK** or **Back**
+  stops and returns to the menu.
+- **Settings** — a scrolling list; **←/→** changes a value, **Back** saves and
+  returns. Settings persist across launches.
+  - **Mode**: SEQ (directory order) · ABC (alphabetical) · RND (random each step)
+  - **Delay**: 1–60 s per tag
+- **About** — short info.
 
-Blue LED blinks on every tag change.
+The blue LED blinks on every tag change.
 
 ## Scope / known limits
 
