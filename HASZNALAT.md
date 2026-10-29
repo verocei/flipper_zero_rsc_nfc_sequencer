@@ -87,6 +87,9 @@ látszanak.
   White). A LED addig világít, **ameddig a kód éppen szól**.
 - **Vibro** – rövid rezgés minden kódnál (Off/On).
 - **Beep** – rövid sípolás minden kódnál (Off/On; hibánál mélyebb hang).
+- **Start delay** – Off, vagy 1–10 mp: a **Start** megnyomása után visszaszámlálás
+  indul, mielőtt a sugárzás elkezdődik, hogy legyen időd az olvasóhoz vinni a
+  Flippert. A visszaszámlálás alatt a **Back** megszakítja.
 
 ## 6. Teszt­kártyák generálása
 

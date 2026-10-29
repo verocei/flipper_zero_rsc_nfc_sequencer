@@ -1,5 +1,5 @@
 /*
- * RSC NFC Sequencer  (v0.6)
+ * RSC NFC Sequencer  (v0.7)
  * ------------------------------------------------------------------
  * A reader / access-control test tool for the Flipper Zero. Cycles
  * through saved .nfc tags and emulates them, so an NFC reader can be
@@ -79,7 +79,11 @@
 #define TICK_MS         50 // scheduler resolution
 
 #define SETTINGS_MAGIC   0x52 // 'R'
-#define SETTINGS_VERSION 6
+#define SETTINGS_VERSION 7
+
+// Countdown before emission begins, so there is time to bring the Flipper to
+// the reader. 0 = start immediately (old behaviour).
+#define START_DELAY_MAX 10
 
 typedef enum {
     ModeSequential = 0,
@@ -241,11 +245,14 @@ struct App {
     LedMode led;
     bool vibro;
     bool beep;
+    uint8_t start_delay; // seconds to count down before emission (0 = off)
     SourceMode src_mode;
     char source[SRC_LEN]; // custom folder path (used when src_mode == SrcCustom)
 
     // runtime
     bool running;
+    bool counting_down; // showing the pre-start countdown
+    uint32_t count_end; // tick at which the countdown reaches zero
     bool finished;
     int current;
     bool last_load_ok;
@@ -319,6 +326,7 @@ typedef struct {
     uint8_t src_mode;
     uint8_t vibro;
     uint8_t beep;
+    uint8_t start_delay;
     uint16_t period_s;
     uint16_t total;
     uint16_t hold_ms;
@@ -340,6 +348,7 @@ static void settings_defaults(App* app) {
     app->led = LedGreen;
     app->vibro = false;
     app->beep = false;
+    app->start_delay = 3;
     app->src_mode = SrcApp;
     app->source[0] = '\0';
     app->gen_data = GenDataName;
@@ -363,6 +372,7 @@ static void settings_load(App* app) {
             if(b.src_mode < SrcCount) app->src_mode = b.src_mode;
             app->vibro = b.vibro ? true : false;
             app->beep = b.beep ? true : false;
+            if(b.start_delay <= START_DELAY_MAX) app->start_delay = b.start_delay;
             app->period_s = b.period_s ? b.period_s : 10;
             app->total = b.total;
             if(b.hold_ms) app->hold_ms = b.hold_ms;
@@ -393,6 +403,7 @@ static void settings_save(App* app) {
     b.src_mode = (uint8_t)app->src_mode;
     b.vibro = app->vibro ? 1 : 0;
     b.beep = app->beep ? 1 : 0;
+    b.start_delay = app->start_delay;
     b.period_s = app->period_s;
     b.total = app->total;
     b.hold_ms = app->hold_ms;
@@ -934,6 +945,7 @@ static void run_stop(App* app) {
         app->nfc = NULL;
     }
     app->running = false;
+    app->counting_down = false;
     app->presenting = false;
 }
 
@@ -976,6 +988,14 @@ static void run_start(App* app) {
 }
 
 static void run_tick(App* app) {
+    if(app->counting_down) {
+        if((int32_t)(furi_get_tick() - app->count_end) >= 0) {
+            app->counting_down = false;
+            furi_timer_stop(app->timer); // run_start restarts it
+            run_start(app);
+        }
+        return;
+    }
     if(!app->running || app->finished) return;
     uint32_t now = furi_get_tick();
 
@@ -1033,6 +1053,40 @@ static void draw_centered_trunc(Canvas* canvas, int y, const char* text) {
     canvas_draw_str(canvas, x, y, buf);
 }
 
+// A single seven-segment digit at (x,y), width w, height h, segment thickness t.
+// Bigger than any built-in font — used for the start countdown.
+static void draw_seg_digit(Canvas* c, int x, int y, int w, int h, int t, int d) {
+    static const uint8_t M[10] = {
+        0x7E, 0x30, 0x6D, 0x79, 0x33, 0x5B, 0x5F, 0x70, 0x7F, 0x7B}; // bits a..g
+    if(d < 0 || d > 9) return;
+    uint8_t m = M[d];
+    int half = (h - t) / 2;
+    if(m & 0x40) canvas_draw_box(c, x, y, w, t); // a (top)
+    if(m & 0x01) canvas_draw_box(c, x, y + half, w, t); // g (middle)
+    if(m & 0x08) canvas_draw_box(c, x, y + 2 * half, w, t); // d (bottom)
+    if(m & 0x02) canvas_draw_box(c, x, y, t, half + t); // f (top-left)
+    if(m & 0x20) canvas_draw_box(c, x + w - t, y, t, half + t); // b (top-right)
+    if(m & 0x04) canvas_draw_box(c, x, y + half, t, half + t); // e (bottom-left)
+    if(m & 0x10) canvas_draw_box(c, x + w - t, y + half, t, half + t); // c (bottom-right)
+}
+
+// Draw a whole number as big seven-segment digits, horizontally centred, with
+// its vertical mid-line at `mid_y`.
+static void draw_big_number(Canvas* c, int number, int mid_y) {
+    char s[12];
+    snprintf(s, sizeof(s), "%d", number);
+    const int w = 22, h = 36, t = 5, gap = 8;
+    int n = (int)strlen(s);
+    int total = n * w + (n - 1) * gap;
+    int x = (128 - total) / 2;
+    if(x < 0) x = 0;
+    int y = mid_y - h / 2;
+    for(int i = 0; s[i]; i++) {
+        draw_seg_digit(c, x, y, w, h, t, s[i] - '0');
+        x += w + gap;
+    }
+}
+
 static void switch_view(App* app, ViewId id) {
     app->current_view = id;
     view_dispatcher_switch_to_view(app->view_dispatcher, id);
@@ -1043,6 +1097,22 @@ static void switch_view(App* app, ViewId id) {
 static void emu_draw_cb(Canvas* canvas, void* model) {
     App* app = ((ViewModel*)model)->app;
     canvas_clear(canvas);
+
+    if(app->counting_down) {
+        canvas_set_font(canvas, FontPrimary);
+        draw_centered_trunc(canvas, 11, "Starting in");
+        int32_t left = (int32_t)(app->count_end - furi_get_tick());
+        if(left < 0) left = 0;
+        uint32_t left_ms = (uint32_t)((uint64_t)left * 1000u / app->tick_freq);
+        int secs = (int)((left_ms + 999u) / 1000u);
+        if(secs < 1) secs = 1;
+        // Big seven-segment number, centred in the band between the title and
+        // the bottom hint (title bottom ~12, hint top ~54 -> mid ~34).
+        draw_big_number(canvas, secs, 34);
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_str(canvas, 2, 62, "Back = cancel");
+        return;
+    }
 
     if(app->finished) {
         canvas_set_font(canvas, FontPrimary);
@@ -1341,7 +1411,19 @@ static void menu_cb(void* context, uint32_t index) {
     App* app = context;
     switch(index) {
     case MenuIndexStart:
-        run_start(app);
+        if(app->start_delay > 0) {
+            // Count down first, so there is time to bring the Flipper to the
+            // reader; run_tick starts the emission when it reaches zero.
+            app->counting_down = true;
+            app->running = false;
+            app->finished = false;
+            app->current = -1;
+            app->count_end =
+                furi_get_tick() + ms_to_ticks(app, (uint32_t)app->start_delay * 1000u);
+            furi_timer_start(app->timer, ms_to_ticks(app, TICK_MS));
+        } else {
+            run_start(app);
+        }
         switch_view(app, ViewIdEmu);
         break;
     case MenuIndexSettings:
@@ -1461,6 +1543,20 @@ static void hold_changed_cb(VariableItem* item) {
     if(idx >= HOLD_COUNT) idx = 0;
     app->hold_ms = hold_choices[idx];
     variable_item_set_current_value_text(item, hold_labels[idx]);
+}
+
+static void start_delay_changed_cb(VariableItem* item) {
+    App* app = variable_item_get_context(item);
+    uint8_t idx = variable_item_get_current_value_index(item);
+    if(idx > START_DELAY_MAX) idx = 0;
+    app->start_delay = idx;
+    if(idx == 0) {
+        variable_item_set_current_value_text(item, "Off");
+    } else {
+        char text[8];
+        snprintf(text, sizeof(text), "%d s", idx);
+        variable_item_set_current_value_text(item, text);
+    }
 }
 
 static void gap_changed_cb(VariableItem* item) {
@@ -1622,6 +1718,16 @@ static void settings_populate(App* app) {
     variable_item_set_current_value_index(it_beep, app->beep ? 1 : 0);
     variable_item_set_current_value_text(it_beep, on_off_label[app->beep ? 1 : 0]);
 
+    VariableItem* it_sd = variable_item_list_add(
+        l, "Start delay", START_DELAY_MAX + 1, start_delay_changed_cb, app);
+    variable_item_set_current_value_index(it_sd, app->start_delay);
+    if(app->start_delay == 0) {
+        variable_item_set_current_value_text(it_sd, "Off");
+    } else {
+        snprintf(text, sizeof(text), "%d s", app->start_delay);
+        variable_item_set_current_value_text(it_sd, text);
+    }
+
     variable_item_list_set_enter_callback(l, settings_enter_cb, app);
 }
 
@@ -1638,7 +1744,7 @@ static void build_about(App* app) {
         "NFC reader / access test.\n"
         "Cycles saved .nfc tags,\n"
         "fixed or random timing.\n"
-        "v0.6  Athos / RSC");
+        "v0.7  Athos / RSC");
 }
 
 static View* make_custom_view(App* app, ViewDrawCallback draw, ViewInputCallback input) {

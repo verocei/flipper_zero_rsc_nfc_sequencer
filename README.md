@@ -87,6 +87,9 @@ The app opens on a menu (the app name is the menu header):
   load. (A steady LED while on USB is the charge indicator, not this app.)
 - **Vibro** — Off / On: a short buzz on each emission.
 - **Beep** — Off / On: a short beep on each emission (lower tone on a load error).
+- **Start delay** — Off, or 1–10 s: after you press **Start**, a countdown runs
+  before emission begins, so you have time to bring the Flipper to the reader.
+  **Back** during the countdown cancels it.
 
 ## Generate tags
 
