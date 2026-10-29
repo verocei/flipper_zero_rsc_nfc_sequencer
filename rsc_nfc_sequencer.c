@@ -1,5 +1,5 @@
 /*
- * RSC NFC Sequencer  (v0.3)
+ * RSC NFC Sequencer  (v0.6)
  * ------------------------------------------------------------------
  * A reader / access-control test tool for the Flipper Zero. Cycles
  * through saved .nfc tags and emulates them, so an NFC reader can be
@@ -15,8 +15,10 @@
  * Total codes:         stop after N emissions (or run forever).
  * Source:              the app's own tags folder, or any chosen folder.
  * LED:                 off / green blink / red blink on each emission.
- * Generate tags:       write GEN-n.nfc files with random 4-byte Type A
- *                      UIDs (into the app folder); Delete removes them.
+ * Generate tags:       write GEN-n.nfc files with random UIDs into the app
+ *                      folder; Delete removes them. The "Data" option can put
+ *                      an NDEF record (name / custom text / URL) into the tag,
+ *                      which a phone reads as text -- those are Mifare Classic 1K.
  *
  * Tags:     the .nfc files in <source> (default: the app's tags folder)
  * Settings: /ext/apps_data/rsc_nfc_sequencer/settings.bin
@@ -37,6 +39,7 @@
 #include <gui/modules/submenu.h>
 #include <gui/modules/variable_item_list.h>
 #include <gui/modules/widget.h>
+#include <gui/modules/text_input.h>
 #include <input/input.h>
 #include <storage/storage.h>
 #include <dialogs/dialogs.h>
@@ -61,6 +64,7 @@
 #define NAME_LEN 64
 #define SRC_LEN  256
 #define PATH_LEN (SRC_LEN + NAME_LEN + 8)
+#define GEN_TEXT_LEN 64 // custom NDEF text / URL entered on the device
 
 #define INTERVAL_MIN     1
 #define INTERVAL_MAX     60
@@ -75,7 +79,7 @@
 #define TICK_MS         50 // scheduler resolution
 
 #define SETTINGS_MAGIC   0x52 // 'R'
-#define SETTINGS_VERSION 5
+#define SETTINGS_VERSION 6
 
 typedef enum {
     ModeSequential = 0,
@@ -111,6 +115,18 @@ static const char* const led_label[LedCount] =
 
 static const char* const on_off_label[2] = {"Off", "On"};
 
+// What (if anything) to write into a generated tag as NDEF data. Off keeps the
+// old UID-only ISO14443-3A tag; the others produce an NTAG215 a phone can read.
+typedef enum {
+    GenDataOff = 0, // UID only (ISO14443-3A), as before
+    GenDataName, // NDEF text record = the tag's own name (GEN-n)
+    GenDataText, // NDEF text record = a custom text
+    GenDataUrl, // NDEF URI record = a URL
+    GenDataCount,
+} GenDataMode;
+
+static const char* const gen_data_label[GenDataCount] = {"Off", "Name", "Text", "URL"};
+
 typedef enum {
     SrcApp = 0, // the app's tags folder (your own / sample tags)
     SrcGenerated, // the generated/ subfolder (GEN-*.nfc)
@@ -140,6 +156,7 @@ typedef enum {
     ViewIdSettings,
     ViewIdEmu,
     ViewIdGenerate,
+    ViewIdGenText,
     ViewIdConfirmDel,
     ViewIdAbout,
 } ViewId;
@@ -186,6 +203,7 @@ struct App {
     View* generate_view;
     View* confirm_view;
     Widget* about;
+    TextInput* text_input;
     Storage* storage;
     DialogsApp* dialogs;
     NotificationApp* notif;
@@ -249,6 +267,8 @@ struct App {
     uint8_t gen_rep;
     bool gen_result_shown;
     int gen_made;
+    GenDataMode gen_data; // what NDEF data to embed in generated tags
+    char gen_text[GEN_TEXT_LEN]; // custom text / URL for GenDataText / GenDataUrl
 };
 
 /* ---------------- helpers ---------------- */
@@ -304,6 +324,8 @@ typedef struct {
     uint16_t hold_ms;
     uint16_t min_gap_ms;
     char source[SRC_LEN];
+    uint8_t gen_data;
+    char gen_text[GEN_TEXT_LEN];
 } SettingsBlob;
 
 static void settings_defaults(App* app) {
@@ -320,6 +342,8 @@ static void settings_defaults(App* app) {
     app->beep = false;
     app->src_mode = SrcApp;
     app->source[0] = '\0';
+    app->gen_data = GenDataName;
+    app->gen_text[0] = '\0';
 }
 
 static void settings_load(App* app) {
@@ -346,6 +370,10 @@ static void settings_load(App* app) {
             b.source[SRC_LEN - 1] = '\0';
             strncpy(app->source, b.source, SRC_LEN - 1);
             app->source[SRC_LEN - 1] = '\0';
+            if(b.gen_data < GenDataCount) app->gen_data = b.gen_data;
+            b.gen_text[GEN_TEXT_LEN - 1] = '\0';
+            strncpy(app->gen_text, b.gen_text, GEN_TEXT_LEN - 1);
+            app->gen_text[GEN_TEXT_LEN - 1] = '\0';
         }
     }
     storage_file_close(f);
@@ -370,6 +398,8 @@ static void settings_save(App* app) {
     b.hold_ms = app->hold_ms;
     b.min_gap_ms = app->min_gap_ms;
     strncpy(b.source, app->source, SRC_LEN - 1);
+    b.gen_data = (uint8_t)app->gen_data;
+    strncpy(b.gen_text, app->gen_text, GEN_TEXT_LEN - 1);
 
     File* f = storage_file_alloc(app->storage);
     if(storage_file_open(f, SETTINGS_PATH, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
@@ -472,8 +502,168 @@ static int generated_max(App* app) {
     return maxn;
 }
 
-// Write `count` GEN-n.nfc files with random 4-byte ISO14443-3A UIDs into the
-// app's own tags folder, continuing the numbering so nothing is overwritten.
+// Write one GEN-n.nfc with a random 4-byte ISO14443-3A UID (UID-only tag).
+static bool write_uid_tag(App* app, const char* path) {
+    uint8_t uid[4];
+    furi_hal_random_fill_buf(uid, sizeof(uid));
+    bool ok = false;
+    File* f = storage_file_alloc(app->storage);
+    if(storage_file_open(f, path, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+        char buf[160];
+        int len = snprintf(
+            buf,
+            sizeof(buf),
+            "Filetype: Flipper NFC device\n"
+            "Version: 4\n"
+            "Device type: ISO14443-3A\n"
+            "UID: %02X %02X %02X %02X\n"
+            "ATQA: 00 04\n"
+            "SAK: 08\n",
+            uid[0],
+            uid[1],
+            uid[2],
+            uid[3]);
+        ok = storage_file_write(f, buf, len) == (size_t)len;
+    }
+    storage_file_close(f);
+    storage_file_free(f);
+    return ok;
+}
+
+// Build an NDEF TLV with a single UTF-8 Text record ("en" language). Standard
+// and portable: NDEF reader apps (NFC Tools, TagInfo) show it. Note a phone's
+// default handler may not pop up for a bare Text record — the URL mode (a URI
+// record) is the surest to display on any phone.
+static size_t build_ndef_text(const char* text, uint8_t* out, size_t cap) {
+    size_t tlen = strlen(text);
+    size_t payload = 1 + 2 + tlen; // status byte + "en" + text
+    size_t msglen = 4 + payload; // D1 01 <payload> 54 + payload
+    size_t total = 2 + msglen + 1; // 03 <msglen> ... FE
+    if(payload > 255 || total > cap) return 0;
+    size_t i = 0;
+    out[i++] = 0x03; // NDEF message TLV
+    out[i++] = (uint8_t)msglen;
+    out[i++] = 0xD1; // MB+ME+SR, TNF = well-known
+    out[i++] = 0x01; // type length
+    out[i++] = (uint8_t)payload;
+    out[i++] = 0x54; // 'T' (text)
+    out[i++] = 0x02; // status: language code length = 2
+    out[i++] = 'e';
+    out[i++] = 'n';
+    memcpy(out + i, text, tlen);
+    i += tlen;
+    out[i++] = 0xFE; // terminator TLV
+    return i;
+}
+
+// Build an NDEF TLV with a single URI record (no prefix abbreviation).
+static size_t build_ndef_uri(const char* uri, uint8_t* out, size_t cap) {
+    size_t ulen = strlen(uri);
+    size_t payload = 1 + ulen; // URI identifier code + URI
+    size_t msglen = 4 + payload; // D1 01 <payload> 55 + payload
+    size_t total = 2 + msglen + 1;
+    if(payload > 255 || total > cap) return 0;
+    size_t i = 0;
+    out[i++] = 0x03;
+    out[i++] = (uint8_t)msglen;
+    out[i++] = 0xD1;
+    out[i++] = 0x01;
+    out[i++] = (uint8_t)payload;
+    out[i++] = 0x55; // 'U' (URI)
+    out[i++] = 0x00; // identifier code 0x00 = no abbreviation (full URI follows)
+    memcpy(out + i, uri, ulen);
+    i += ulen;
+    out[i++] = 0xFE;
+    return i;
+}
+
+// Write one GEN-n.nfc as a Mifare Classic 1K tag carrying `user` (an NDEF TLV)
+// in its NDEF sectors, with a random 4-byte UID. Modelled on a known-good tag:
+// the Flipper emulates Mifare Classic NDEF reliably for phones, whereas its
+// NTAG/Ultralight emulation often yields only the UID. The .nfc text is written
+// directly (block layout), matching the saved-tag format exactly.
+static bool write_mfc_tag(App* app, const char* path, const uint8_t* user, size_t user_len) {
+    uint8_t img[1024]; // 64 blocks x 16 bytes
+    memset(img, 0, sizeof(img));
+
+    uint8_t uid[4];
+    furi_hal_random_fill_buf(uid, sizeof(uid));
+
+    // Block 0: UID + BCC + SAK/ATQA + manufacturer bytes.
+    img[0] = uid[0];
+    img[1] = uid[1];
+    img[2] = uid[2];
+    img[3] = uid[3];
+    img[4] = uid[0] ^ uid[1] ^ uid[2] ^ uid[3]; // BCC
+    img[5] = 0x08; // SAK
+    img[6] = 0x04; // ATQA
+    img[7] = 0x00;
+    static const uint8_t mfg[8] = {0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69};
+    memcpy(img + 8, mfg, 8);
+
+    // Blocks 1-2: MAD (Mifare Application Directory), every sector -> NDEF (03 E1).
+    img[16] = 0x14; // MAD CRC (fixed for this all-NDEF directory)
+    img[17] = 0x01; // info byte
+    for(int k = 2; k < 16; k += 2) {
+        img[16 + k] = 0x03;
+        img[16 + k + 1] = 0xE1;
+    }
+    for(int k = 0; k < 16; k += 2) {
+        img[32 + k] = 0x03;
+        img[32 + k + 1] = 0xE1;
+    }
+
+    // Sector trailers: sector 0 uses the MAD key A0..A5, the rest the public NDEF
+    // key D3F7.. ; access bits leave the data blocks readable with key A.
+    static const uint8_t mad_tr[16] = {
+        0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x78, 0x77, 0x88, 0xC1, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    static const uint8_t ndef_tr[16] = {
+        0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7, 0x7F, 0x07, 0x88, 0x40, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    memcpy(img + 3 * 16, mad_tr, 16);
+    for(int s = 1; s < 16; s++) memcpy(img + (s * 4 + 3) * 16, ndef_tr, 16);
+
+    // Lay the NDEF TLV across the data blocks of sectors 1..15 (skip trailers).
+    size_t bi = 0;
+    for(int blk = 4; blk < 64 && bi < user_len; blk++) {
+        if((blk % 4) == 3) continue; // sector trailer
+        for(int j = 0; j < 16 && bi < user_len; j++) img[blk * 16 + j] = user[bi++];
+    }
+
+    bool ok = false;
+    File* f = storage_file_alloc(app->storage);
+    if(storage_file_open(f, path, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+        FuriString* s = furi_string_alloc();
+        furi_string_printf(
+            s,
+            "Filetype: Flipper NFC device\n"
+            "Version: 4\n"
+            "Device type: Mifare Classic\n"
+            "UID: %02X %02X %02X %02X\n"
+            "ATQA: 00 04\n"
+            "SAK: 08\n"
+            "Mifare Classic type: 1K\n"
+            "Data format version: 2\n",
+            uid[0],
+            uid[1],
+            uid[2],
+            uid[3]);
+        for(int blk = 0; blk < 64; blk++) {
+            furi_string_cat_printf(s, "Block %d:", blk);
+            for(int j = 0; j < 16; j++) furi_string_cat_printf(s, " %02X", img[blk * 16 + j]);
+            furi_string_cat_printf(s, "\n");
+        }
+        size_t len = furi_string_size(s);
+        ok = storage_file_write(f, furi_string_get_cstr(s), len) == len;
+        furi_string_free(s);
+    }
+    storage_file_close(f);
+    storage_file_free(f);
+    return ok;
+}
+
+// Write `count` GEN-n.nfc files into the app's generated folder, continuing the
+// numbering so nothing is overwritten. The tag kind depends on app->gen_data:
+// Off = a UID-only ISO14443-3A tag; Name/Text/URL = a Mifare Classic 1K with NDEF.
 static int generate_tags(App* app, int count) {
     storage_common_mkdir(app->storage, BASE_DIR);
     storage_common_mkdir(app->storage, TAGS_DIR);
@@ -481,30 +671,29 @@ static int generate_tags(App* app, int count) {
     int base = generated_max(app);
     int made = 0;
     for(int i = 1; i <= count; i++) {
-        uint8_t uid[4];
-        furi_hal_random_fill_buf(uid, sizeof(uid));
         char path[PATH_LEN];
         snprintf(path, sizeof(path), "%s/GEN-%d%s", GEN_DIR, base + i, NFC_EXT);
-        File* f = storage_file_alloc(app->storage);
-        if(storage_file_open(f, path, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
-            char buf[160];
-            int len = snprintf(
-                buf,
-                sizeof(buf),
-                "Filetype: Flipper NFC device\n"
-                "Version: 4\n"
-                "Device type: ISO14443-3A\n"
-                "UID: %02X %02X %02X %02X\n"
-                "ATQA: 00 04\n"
-                "SAK: 08\n",
-                uid[0],
-                uid[1],
-                uid[2],
-                uid[3]);
-            if(storage_file_write(f, buf, len) == (size_t)len) made++;
+
+        if(app->gen_data == GenDataOff) {
+            if(write_uid_tag(app, path)) made++;
+            continue;
         }
-        storage_file_close(f);
-        storage_file_free(f);
+
+        uint8_t user[512];
+        size_t user_len = 0;
+        if(app->gen_data == GenDataUrl) {
+            user_len = build_ndef_uri(app->gen_text, user, sizeof(user));
+        } else {
+            char text[GEN_TEXT_LEN];
+            if(app->gen_data == GenDataName) {
+                snprintf(text, sizeof(text), "GEN-%d", base + i);
+            } else { // GenDataText
+                strncpy(text, app->gen_text, sizeof(text) - 1);
+                text[sizeof(text) - 1] = '\0';
+            }
+            user_len = build_ndef_text(text, user, sizeof(user));
+        }
+        if(user_len && write_mfc_tag(app, path, user, user_len)) made++;
     }
     return made;
 }
@@ -938,6 +1127,26 @@ static bool emu_input_cb(InputEvent* event, void* context) {
 
 /* ---------------- generate view ---------------- */
 
+// Run the generation and switch to the confirmation screen.
+static void do_generate(App* app) {
+    int made = generate_tags(app, app->gen_count);
+    app->src_mode = SrcGenerated; // point the source at the new generated set
+    settings_save(app);
+    tags_scan(app);
+    set_source_item_text(app);
+    app->gen_made = made;
+    app->gen_result_shown = true; // show a confirmation instead of leaving silently
+    switch_view(app, ViewIdGenerate);
+    with_view_model(app->generate_view, ViewModel * m, { UNUSED(m); }, true);
+}
+
+// The text / URL editor accepted: gen_text is already filled; persist and make.
+static void gen_text_done_cb(void* context) {
+    App* app = context;
+    settings_save(app);
+    do_generate(app);
+}
+
 static void generate_draw_cb(Canvas* canvas, void* model) {
     App* app = ((ViewModel*)model)->app;
     canvas_clear(canvas);
@@ -954,18 +1163,27 @@ static void generate_draw_cb(Canvas* canvas, void* model) {
     }
 
     canvas_set_font(canvas, FontPrimary);
-    draw_centered_trunc(canvas, 12, "Generate tags");
+    draw_centered_trunc(canvas, 11, "Generate tags");
 
     canvas_set_font(canvas, FontBigNumbers);
     char num[8];
     snprintf(num, sizeof(num), "%d", app->gen_count);
     int w = canvas_string_width(canvas, num);
-    canvas_draw_str(canvas, (128 - w) / 2, 42, num);
+    canvas_draw_str(canvas, (128 - w) / 2, 34, num);
 
     canvas_set_font(canvas, FontSecondary);
-    draw_centered_trunc(canvas, 52, "hold: +5, long hold: +10");
-    canvas_draw_str(canvas, 2, 62, "Back=cancel");
-    canvas_draw_str(canvas, 86, 62, "OK=make");
+    char dl[40];
+    snprintf(dl, sizeof(dl), "Data: %s", gen_data_label[app->gen_data]);
+    draw_centered_trunc(canvas, 45, dl);
+
+    bool needs_text = (app->gen_data == GenDataText || app->gen_data == GenDataUrl);
+    if(needs_text)
+        draw_centered_trunc(canvas, 54, app->gen_text[0] ? app->gen_text : "(empty)");
+    else
+        draw_centered_trunc(canvas, 54, "<> data   ^v count");
+
+    canvas_draw_str(canvas, 2, 63, "Back");
+    canvas_draw_str(canvas, 86, 63, needs_text ? "OK=type" : "OK=make");
 }
 
 static bool generate_input_cb(InputEvent* event, void* context) {
@@ -983,26 +1201,39 @@ static bool generate_input_cb(InputEvent* event, void* context) {
         return false;
     }
 
-    bool inc = (event->key == InputKeyUp || event->key == InputKeyRight);
-    bool dec = (event->key == InputKeyDown || event->key == InputKeyLeft);
+    // Up/Down change the count; Left/Right cycle the Data mode.
+    bool up = (event->key == InputKeyUp);
+    bool down = (event->key == InputKeyDown);
     int delta = 0;
 
-    if(event->type == InputTypeShort && (inc || dec)) {
+    if(event->type == InputTypeShort && (up || down)) {
         app->gen_rep = 0;
-        delta = inc ? 1 : -1;
-    } else if(event->type == InputTypeRepeat && (inc || dec)) {
+        delta = up ? 1 : -1;
+    } else if(event->type == InputTypeRepeat && (up || down)) {
         if(app->gen_rep < 255) app->gen_rep++;
         int step = (app->gen_rep <= 5) ? 5 : 10;
-        delta = inc ? step : -step;
-    } else if(event->type == InputTypeShort && event->key == InputKeyOk) {
-        int made = generate_tags(app, app->gen_count);
-        app->src_mode = SrcGenerated; // point the source at the new generated set
-        settings_save(app);
-        tags_scan(app);
-        set_source_item_text(app);
-        app->gen_made = made;
-        app->gen_result_shown = true; // show a confirmation instead of leaving silently
+        delta = up ? step : -step;
+    } else if(
+        event->type == InputTypeShort &&
+        (event->key == InputKeyLeft || event->key == InputKeyRight)) {
+        int n = (int)app->gen_data + (event->key == InputKeyRight ? 1 : -1);
+        if(n < 0) n = GenDataCount - 1;
+        if(n >= (int)GenDataCount) n = 0;
+        app->gen_data = (GenDataMode)n;
         with_view_model(app->generate_view, ViewModel * m, { UNUSED(m); }, true);
+        return true;
+    } else if(event->type == InputTypeShort && event->key == InputKeyOk) {
+        if(app->gen_data == GenDataText || app->gen_data == GenDataUrl) {
+            // Capture the text/URL first, then generate (done in gen_text_done_cb).
+            text_input_reset(app->text_input);
+            text_input_set_header_text(
+                app->text_input, app->gen_data == GenDataUrl ? "Enter URL" : "Enter text");
+            text_input_set_result_callback(
+                app->text_input, gen_text_done_cb, app, app->gen_text, GEN_TEXT_LEN, false);
+            switch_view(app, ViewIdGenText);
+        } else {
+            do_generate(app);
+        }
         return true;
     } else if(event->type == InputTypeShort && event->key == InputKeyBack) {
         switch_view(app, ViewIdMenu);
@@ -1259,6 +1490,9 @@ static bool navigation_cb(void* context) {
         settings_save(app);
         switch_view(app, ViewIdMenu);
         return true;
+    case ViewIdGenText:
+        switch_view(app, ViewIdGenerate); // back from the editor to the generate screen
+        return true;
     case ViewIdGenerate:
     case ViewIdConfirmDel:
     case ViewIdAbout:
@@ -1404,7 +1638,7 @@ static void build_about(App* app) {
         "NFC reader / access test.\n"
         "Cycles saved .nfc tags,\n"
         "fixed or random timing.\n"
-        "v0.3  Athos / RSC");
+        "v0.6  Athos / RSC");
 }
 
 static View* make_custom_view(App* app, ViewDrawCallback draw, ViewInputCallback input) {
@@ -1462,6 +1696,10 @@ static App* app_alloc(void) {
     app->confirm_view = make_custom_view(app, confirm_draw_cb, confirm_input_cb);
     view_dispatcher_add_view(app->view_dispatcher, ViewIdConfirmDel, app->confirm_view);
 
+    app->text_input = text_input_alloc();
+    view_dispatcher_add_view(
+        app->view_dispatcher, ViewIdGenText, text_input_get_view(app->text_input));
+
     build_about(app);
     view_dispatcher_add_view(app->view_dispatcher, ViewIdAbout, widget_get_view(app->about));
 
@@ -1477,6 +1715,7 @@ static void app_free(App* app) {
     view_dispatcher_remove_view(app->view_dispatcher, ViewIdSettings);
     view_dispatcher_remove_view(app->view_dispatcher, ViewIdEmu);
     view_dispatcher_remove_view(app->view_dispatcher, ViewIdGenerate);
+    view_dispatcher_remove_view(app->view_dispatcher, ViewIdGenText);
     view_dispatcher_remove_view(app->view_dispatcher, ViewIdConfirmDel);
     view_dispatcher_remove_view(app->view_dispatcher, ViewIdAbout);
 
@@ -1485,6 +1724,7 @@ static void app_free(App* app) {
     view_free(app->emu_view);
     view_free(app->generate_view);
     view_free(app->confirm_view);
+    text_input_free(app->text_input);
     widget_free(app->about);
 
     view_dispatcher_free(app->view_dispatcher);

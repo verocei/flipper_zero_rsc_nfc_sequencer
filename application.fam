@@ -9,7 +9,7 @@ App(
     requires=["gui", "storage", "dialogs"],
     fap_category="NFC",
     fap_author="Athos / RSC",
-    fap_version="0.3",
+    fap_version="0.6",
     fap_description="Sequential / alphabetical / random UID emulation for access-control testing",
     fap_icon="icon_10px.png", # 10x10 1-bit NFC contactless-waves icon
 )

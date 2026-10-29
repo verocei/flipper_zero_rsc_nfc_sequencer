@@ -50,7 +50,7 @@ copy the matching `.fap` to each device (`/ext/apps/NFC/`).
    /ext/apps_data/rsc_nfc_sequencer/tags/
    ```
 
-   (the app creates this folder on first run). Up to 64 `.nfc` files.
+   (the app creates this folder on first run). Up to 128 `.nfc` files.
 
 ## Use
 
@@ -90,13 +90,36 @@ The app opens on a menu (the app name is the menu header):
 
 ## Generate tags
 
-**Menu → Generate tags.** Set the count (←/→ or ↑/↓: tap +1, hold +5, longer
-hold +10, up to 100), then **OK**. The app writes `GEN-1.nfc`, `GEN-2.nfc`, …
-with random 4-byte ISO14443-3A UIDs into the **`tags/generated/`** subfolder,
-continuing the numbering so nothing is overwritten, shows a confirmation, and
-sets **Source → Generated**. **Delete generated** removes them again. Generation
-and deletion only ever touch the app's own folder, never a folder you picked
-under **Source**.
+**Menu → Generate tags.**
+
+- **↑ / ↓** set the count (tap +1, hold +5, longer hold +10, up to 100).
+- **← / →** choose **Data** — what to write into each tag (see below).
+- **OK** makes them (for *Text* / *URL* it first opens an on-screen keyboard).
+
+The app writes `GEN-1.nfc`, `GEN-2.nfc`, … into the **`tags/generated/`**
+subfolder, continuing the numbering so nothing is overwritten, shows a
+confirmation, and sets **Source → Generated**. **Delete generated** removes them
+again. Generation and deletion only ever touch the app's own folder, never a
+folder you picked under **Source**.
+
+### Data (what a reader sees)
+
+- **Off** — a plain **UID-only** tag (random 4-byte ISO14443-3A). A reader sees
+  only the UID. This is the classic access-control test tag.
+- **Name** — the tag also carries an **NDEF text record** equal to its own name
+  (`GEN-1`, `GEN-2`, …).
+- **Text** — an NDEF text record with a text you type.
+- **URL** — an NDEF URI record with a URL you type (a phone offers to open it).
+
+For **Name / Text / URL** the generated tag is a **Mifare Classic 1K** with the
+NDEF data in its sectors (MAD + standard NDEF keys). Mifare Classic is used on
+purpose: the Flipper emulates it reliably for phones, whereas its NTAG/Ultralight
+emulation often gives a phone only the UID. An NDEF reader app (NFC Tools,
+TagInfo) shows the record; a phone's **default** handler usually pops up only for
+a **URL** (URI record), not for a bare text record, so pick **URL** if you want
+the phone to react on its own. Either way a **UID-based access reader still only
+reads the UID** — the NDEF data does not change what it sees. The data is
+embedded only in newly generated tags, not in saved tags you copied in yourself.
 
 ## Scope / known limits
 

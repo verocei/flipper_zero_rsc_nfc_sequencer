@@ -90,11 +90,37 @@ látszanak.
 
 ## 6. Teszt­kártyák generálása
 
-**Menü → Generate tags.** Állítsd be a darabszámot – **koppintás = +1**, **nyomva
-tartva +5**, **hosszabban +10** (legfeljebb 100) –, majd **OK**. A program
-`GEN-1.nfc`, `GEN-2.nfc`, … néven, véletlen 4 bájtos UID-val létrehozza őket a
-`tags/generated/` mappába (a számozást folytatja, semmit nem ír felül), a végén
-kiírja, hányat készített, és a forrást **Generated**-re állítja.
+**Menü → Generate tags.**
+
+- **↑ / ↓** – a darabszám (koppintás +1, nyomva tartva +5, hosszabban +10,
+  legfeljebb 100).
+- **← / →** – a **Data** (adat): mi kerüljön a címkébe (lásd lentebb).
+- **OK** – elkészíti (a *Text* / *URL* módnál előbb a képernyős billentyűzet
+  nyílik meg, ott írod be a szöveget/címet).
+
+A program `GEN-1.nfc`, `GEN-2.nfc`, … néven hozza létre őket a `tags/generated/`
+mappába (a számozást folytatja, semmit nem ír felül), a végén kiírja, hányat
+készített, és a forrást **Generated**-re állítja.
+
+### Data – mit lát az olvasó
+
+- **Off** – sima, **csak UID** címke (véletlen 4 bájtos ISO14443-3A). Az olvasó
+  csak a UID-t látja. Ez a klasszikus beléptető­teszt-címke.
+- **Name** – a címke a UID mellett a **saját nevét** is viszi NDEF
+  szövegrekordként (`GEN-1`, `GEN-2`, …).
+- **Text** – beírt szöveg NDEF szövegrekordként.
+- **URL** – beírt webcím NDEF URI-rekordként (a telefon felajánlja a megnyitását).
+
+A **Name / Text / URL** módban a generált címke **Mifare Classic 1K**, az NDEF
+adattal a szektoraiban (MAD + szabványos NDEF-kulcsok). Azért Mifare Classic: a
+Flipper ezt megbízhatóan emulálja a telefon felé, míg az NTAG/Ultralight
+emulációnál a telefon gyakran csak a UID-t kapja meg. Egy NDEF-olvasó app (NFC
+Tools, TagInfo) megjeleníti a rekordot; a telefon **alapértelmezett** kezelője
+viszont általában csak a **URL**-re (URI-rekord) ugrik fel magától, a csupasz
+szövegrekordra nem – ha azt akarod, hogy a telefon magától reagáljon, válaszd a
+**URL** módot. A **UID-alapú beléptető olvasó mindenképp csak a UID-t olvassa**,
+az NDEF-adatot nem. Az adat csak az **újonnan generált** címkékbe kerül, a saját,
+bemásolt kártyáidba nem.
 
 **Delete generated** – rákérdezés után törli a generált kártyákat.
 
