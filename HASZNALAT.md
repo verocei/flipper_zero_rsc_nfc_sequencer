@@ -4,8 +4,26 @@ Flipper Zero alkalmazás NFC-olvasók és beléptetőrendszerek **teszteléséhe
 program sorra veszi az elmentett `.nfc` kártyákat, és mindegyiket „lejátssza”
 (emulálja) az olvasó felé – felügyelet nélkül, akár véletlenszerű időzítéssel.
 
-> Megjegyzés: a program kezelőfelülete angol nyelvű; ez az útmutató magyarul
-> mutatja be. A funkciók pontos neve zárójelben, angolul szerepel.
+> **Nyelv (0.8-tól):** a kezelőfelület angol, magyar vagy német lehet. Telepítés
+> után angol; átállítani a **Settings** lista legelső sorában (**Language**) lehet –
+> a választás azonnal érvényes, és megmarad. A képernyőn nincsenek ékezetek (a
+> Flipper betűkészletében nincsenek ilyen betűk).
+>
+> Ez az útmutató a funkciókat az angol nevükkel említi; a magyar felületen így
+> hívják őket:
+>
+> | Angol | Magyar | | Angol | Magyar |
+> |---|---|---|---|---|
+> | Start | Inditas | | Hold | Tartas |
+> | Settings | Beallitasok | | Total | Osszesen |
+> | Generate tags | Cimkek keszitese | | Source | Forras (App / Generalt / Tallozas) |
+> | Delete generated | Generaltak torlese | | LED | LED |
+> | About | Nevjegy | | Vibro | Rezges |
+> | Language | Nyelv | | Beep | Hang |
+> | Order (SEQ/ABC/RND) | Sorrend (SOR/ABC/VEL) | | Start delay | Kesleltetes |
+> | Timing (Fixed/Burst) | Idozites (Fix/Sorozat) | | Data (Off/Name/Text/URL) | Adat (Ki/Nev/Szoveg/URL) |
+> | Delay | Idokoz | | Off / On | Ki / Be |
+> | Codes/period, Period | Kod/periodus, Periodus | | Min gap | Min. szunet |
 
 ## 1. Telepítés
 
@@ -63,6 +81,7 @@ A listában **balra/jobbra** állítod az értéket, **Back** menti és visszal�
 beállítások újraindítás után is megmaradnak. A Timing szerint csak a lényeges sorok
 látszanak.
 
+- **Language** – a kezelőfelület nyelve: English (alapból), Magyar, Deutsch.
 - **Order** – milyen sorrendben jönnek a kártyák:
   - **SEQ** – mappa szerinti sorrend
   - **ABC** – név szerinti (ábécé)

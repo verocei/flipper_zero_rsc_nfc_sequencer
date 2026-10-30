@@ -6,6 +6,9 @@ unattended.
 
 Runs on **stock (OFW)** and **Momentum** firmware (shared OFW NFC API only).
 
+The interface is available in **English** (default after install), **Hungarian**
+and **German** — pick it in the first row of **Settings** (**Language**).
+
 > Magyar használati útmutató: [HASZNALAT.md](HASZNALAT.md).
 
 ## Build
@@ -66,6 +69,9 @@ The app opens on a menu (the app name is the menu header):
 
 ### Settings
 
+- **Language**: English (default) · Magyar · Deutsch. Applies at once and is saved.
+  On-screen text has no accented letters (the Flipper fonts lack them), so German
+  is written with ae/oe/ue/ss.
 - **Order**: SEQ (directory order) · ABC (alphabetical) · RND (random each step)
 - **Timing** — each code is presented for the **Hold** time (field on), then the
   field drops, so a reader sees each code once (like a tap) instead of reading the

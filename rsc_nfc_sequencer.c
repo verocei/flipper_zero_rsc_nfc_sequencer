@@ -1,5 +1,5 @@
 /*
- * RSC NFC Sequencer  (v0.7)
+ * RSC NFC Sequencer  (v0.8)
  * ------------------------------------------------------------------
  * A reader / access-control test tool for the Flipper Zero. Cycles
  * through saved .nfc tags and emulates them, so an NFC reader can be
@@ -20,6 +20,8 @@
  *                      an NDEF record (name / custom text / URL) into the tag,
  *                      which a phone reads as text -- those are Mifare Classic 1K.
  *
+ * Language:            English (default), Magyar, Deutsch -- first settings row.
+ *
  * Tags:     the .nfc files in <source> (default: the app's tags folder)
  * Settings: /ext/apps_data/rsc_nfc_sequencer/settings.bin
  *
@@ -31,6 +33,7 @@
  * on the Flipper and outside this app's intended use.
  */
 
+#include <stddef.h>
 #include <furi.h>
 #include <furi_hal_random.h>
 #include <gui/gui.h>
@@ -79,7 +82,20 @@
 #define TICK_MS         50 // scheduler resolution
 
 #define SETTINGS_MAGIC   0x52 // 'R'
-#define SETTINGS_VERSION 7
+#define SETTINGS_VERSION 8
+#define SETTINGS_VERSION_V7 7 // same blob without the language byte; still loaded
+
+// UI language: index into the [LANG_COUNT] string tables below. English is the
+// default after install. No accented letters on screen (the Flipper fonts lack
+// them), so German uses ae/oe/ue/ss.
+#define LANG_EN    0
+#define LANG_HU    1
+#define LANG_DE    2
+#define LANG_COUNT 3
+static uint8_t g_lang = LANG_EN;
+#define L(en, hu, de) (g_lang == LANG_HU ? (hu) : g_lang == LANG_DE ? (de) : (en))
+
+static const char* const language_names[LANG_COUNT] = {"English", "Magyar", "Deutsch"};
 
 // Countdown before emission begins, so there is time to bring the Flipper to
 // the reader. 0 = start immediately (old behaviour).
@@ -92,7 +108,11 @@ typedef enum {
     ModeCount,
 } PlayMode;
 
-static const char* const mode_label[ModeCount] = {"SEQ", "ABC", "RND"};
+static const char* const mode_label[LANG_COUNT][ModeCount] = {
+    {"SEQ", "ABC", "RND"},
+    {"SOR", "ABC", "VEL"},
+    {"SEQ", "ABC", "ZUF"},
+};
 
 typedef enum {
     TimingFixed = 0,
@@ -100,7 +120,11 @@ typedef enum {
     TimingCount,
 } TimingMode;
 
-static const char* const timing_label[TimingCount] = {"Fixed", "Burst"};
+static const char* const timing_label[LANG_COUNT][TimingCount] = {
+    {"Fixed", "Burst"},
+    {"Fix", "Sorozat"},
+    {"Fest", "Burst"},
+};
 
 typedef enum {
     LedOff = 0,
@@ -114,10 +138,17 @@ typedef enum {
     LedCount,
 } LedMode;
 
-static const char* const led_label[LedCount] =
-    {"Off", "Red", "Green", "Blue", "Yellow", "Cyan", "Magenta", "White"};
+static const char* const led_label[LANG_COUNT][LedCount] = {
+    {"Off", "Red", "Green", "Blue", "Yellow", "Cyan", "Magenta", "White"},
+    {"Ki", "Piros", "Zold", "Kek", "Sarga", "Cian", "Bibor", "Feher"},
+    {"Aus", "Rot", "Gruen", "Blau", "Gelb", "Cyan", "Magenta", "Weiss"},
+};
 
-static const char* const on_off_label[2] = {"Off", "On"};
+static const char* const on_off_label[LANG_COUNT][2] = {
+    {"Off", "On"},
+    {"Ki", "Be"},
+    {"Aus", "An"},
+};
 
 // What (if anything) to write into a generated tag as NDEF data. Off keeps the
 // old UID-only ISO14443-3A tag; the others produce an NTAG215 a phone can read.
@@ -129,7 +160,11 @@ typedef enum {
     GenDataCount,
 } GenDataMode;
 
-static const char* const gen_data_label[GenDataCount] = {"Off", "Name", "Text", "URL"};
+static const char* const gen_data_label[LANG_COUNT][GenDataCount] = {
+    {"Off", "Name", "Text", "URL"},
+    {"Ki", "Nev", "Szoveg", "URL"},
+    {"Aus", "Name", "Text", "URL"},
+};
 
 typedef enum {
     SrcApp = 0, // the app's tags folder (your own / sample tags)
@@ -175,7 +210,8 @@ typedef enum {
 
 // Row order in the settings list.
 typedef enum {
-    RowMode = 0,
+    RowLanguage = 0,
+    RowMode,
     RowTiming,
     RowDelay,
     RowPerPeriod,
@@ -189,6 +225,7 @@ typedef enum {
     CustomEventTick = 1,
     CustomEventOpenSource = 2,
     CustomEventRebuildSettings = 3,
+    CustomEventLanguage = 4,
 } CustomEvent;
 
 typedef struct App App;
@@ -282,6 +319,8 @@ struct App {
 
 static void settings_populate(App* app); // defined later; used by the event handler
 static void set_source_item_text(App* app); // defined later; used by the generate view
+static void menu_populate(App* app); // defined later; rebuilt on a language change
+static void about_populate(App* app); // defined later; rebuilt on a language change
 
 static uint32_t ms_to_ticks(App* app, uint32_t ms) {
     return (uint32_t)(((uint64_t)ms * app->tick_freq) / 1000u);
@@ -334,6 +373,7 @@ typedef struct {
     char source[SRC_LEN];
     uint8_t gen_data;
     char gen_text[GEN_TEXT_LEN];
+    uint8_t language; // v8; a v7 file ends before it
 } SettingsBlob;
 
 static void settings_defaults(App* app) {
@@ -353,6 +393,7 @@ static void settings_defaults(App* app) {
     app->source[0] = '\0';
     app->gen_data = GenDataName;
     app->gen_text[0] = '\0';
+    g_lang = LANG_EN;
 }
 
 static void settings_load(App* app) {
@@ -361,8 +402,13 @@ static void settings_load(App* app) {
     File* f = storage_file_alloc(app->storage);
     if(storage_file_open(f, SETTINGS_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) {
         SettingsBlob b;
-        if(storage_file_read(f, &b, sizeof(b)) == sizeof(b) && b.magic == SETTINGS_MAGIC &&
-           b.version == SETTINGS_VERSION) {
+        memset(&b, 0, sizeof(b));
+        size_t got = storage_file_read(f, &b, sizeof(b));
+        // A v7 file (before the language setting) keeps its settings and gets
+        // the default language.
+        bool v8 = b.version == SETTINGS_VERSION && got == sizeof(b);
+        bool v7 = b.version == SETTINGS_VERSION_V7 && got >= offsetof(SettingsBlob, language);
+        if(b.magic == SETTINGS_MAGIC && (v8 || v7)) {
             if(b.mode < ModeCount) app->mode = b.mode;
             if(b.timing < TimingCount) app->timing = b.timing;
             if(b.interval >= INTERVAL_MIN && b.interval <= INTERVAL_MAX) app->interval = b.interval;
@@ -384,6 +430,7 @@ static void settings_load(App* app) {
             b.gen_text[GEN_TEXT_LEN - 1] = '\0';
             strncpy(app->gen_text, b.gen_text, GEN_TEXT_LEN - 1);
             app->gen_text[GEN_TEXT_LEN - 1] = '\0';
+            if(v8 && b.language < LANG_COUNT) g_lang = b.language;
         }
     }
     storage_file_close(f);
@@ -411,6 +458,7 @@ static void settings_save(App* app) {
     strncpy(b.source, app->source, SRC_LEN - 1);
     b.gen_data = (uint8_t)app->gen_data;
     strncpy(b.gen_text, app->gen_text, GEN_TEXT_LEN - 1);
+    b.language = g_lang;
 
     File* f = storage_file_alloc(app->storage);
     if(storage_file_open(f, SETTINGS_PATH, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
@@ -1100,7 +1148,7 @@ static void emu_draw_cb(Canvas* canvas, void* model) {
 
     if(app->counting_down) {
         canvas_set_font(canvas, FontPrimary);
-        draw_centered_trunc(canvas, 11, "Starting in");
+        draw_centered_trunc(canvas, 11, L("Starting in", "Indulasig", "Start in"));
         int32_t left = (int32_t)(app->count_end - furi_get_tick());
         if(left < 0) left = 0;
         uint32_t left_ms = (uint32_t)((uint64_t)left * 1000u / app->tick_freq);
@@ -1110,27 +1158,35 @@ static void emu_draw_cb(Canvas* canvas, void* model) {
         // the bottom hint (title bottom ~12, hint top ~54 -> mid ~34).
         draw_big_number(canvas, secs, 34);
         canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 2, 62, "Back = cancel");
+        canvas_draw_str(
+            canvas, 2, 62, L("Back = cancel", "Vissza = megse", "Zurueck = Abbruch"));
         return;
     }
 
     if(app->finished) {
         canvas_set_font(canvas, FontPrimary);
-        draw_centered_trunc(canvas, 28, "Done");
+        draw_centered_trunc(canvas, 28, L("Done", "Kesz", "Fertig"));
         canvas_set_font(canvas, FontSecondary);
         char line[32];
-        snprintf(line, sizeof(line), "%lu codes sent", (unsigned long)app->emitted);
+        snprintf(
+            line,
+            sizeof(line),
+            L("%lu codes sent", "%lu kod elkuldve", "%lu Codes gesendet"),
+            (unsigned long)app->emitted);
         draw_centered_trunc(canvas, 44, line);
-        canvas_draw_str(canvas, 2, 62, "Back = menu");
+        canvas_draw_str(canvas, 2, 62, L("Back = menu", "Vissza = menu", "Zurueck = Menue"));
         return;
     }
 
     if(app->tag_count == 0) {
         canvas_set_font(canvas, FontPrimary);
-        draw_centered_trunc(canvas, 30, "No tags");
+        draw_centered_trunc(canvas, 30, L("No tags", "Nincs cimke", "Keine Tags"));
         canvas_set_font(canvas, FontSecondary);
-        draw_centered_trunc(canvas, 44, "No .nfc in source folder");
-        canvas_draw_str(canvas, 2, 62, "Back = menu");
+        draw_centered_trunc(
+            canvas,
+            44,
+            L("No .nfc in source folder", "Nincs .nfc a forrasban", "Kein .nfc im Quellordner"));
+        canvas_draw_str(canvas, 2, 62, L("Back = menu", "Vissza = menu", "Zurueck = Menue"));
         return;
     }
 
@@ -1142,13 +1198,18 @@ static void emu_draw_cb(Canvas* canvas, void* model) {
             top,
             sizeof(top),
             "%s  %ds  %d/%d",
-            mode_label[app->mode],
+            mode_label[g_lang][app->mode],
             app->interval,
             app->current + 1,
             app->tag_count);
     } else {
         snprintf(
-            top, sizeof(top), "%s  %d/%ds", mode_label[app->mode], app->per_period, app->period_s);
+            top,
+            sizeof(top),
+            "%s  %d/%ds",
+            mode_label[g_lang][app->mode],
+            app->per_period,
+            app->period_s);
     }
     canvas_draw_str(canvas, 2, 10, top);
     canvas_draw_line(canvas, 0, 13, 128, 13);
@@ -1157,11 +1218,14 @@ static void emu_draw_cb(Canvas* canvas, void* model) {
     // emissions so the name (e.g. GEN-1) and UID remain readable.
     canvas_set_font(canvas, FontPrimary);
     if(app->current < 0) {
-        draw_centered_trunc(canvas, 32, "Starting");
+        draw_centered_trunc(canvas, 32, L("Starting", "Indul", "Startet"));
     } else {
         char name[NAME_LEN];
         tag_display_name(app, app->current, name, sizeof(name));
-        draw_centered_trunc(canvas, 32, app->last_load_ok ? name : "!! load failed");
+        draw_centered_trunc(
+            canvas,
+            32,
+            app->last_load_ok ? name : L("!! load failed", "!! betoltesi hiba", "!! Ladefehler"));
     }
 
     // UID of the last sent tag — small, kept on screen too.
@@ -1177,10 +1241,16 @@ static void emu_draw_cb(Canvas* canvas, void* model) {
     if(app->total > 0) {
         snprintf(bottom, sizeof(bottom), "%lu/%u", (unsigned long)app->emitted, app->total);
     } else {
-        snprintf(bottom, sizeof(bottom), "sent %lu", (unsigned long)app->emitted);
+        snprintf(
+            bottom,
+            sizeof(bottom),
+            L("sent %lu", "kuldve %lu", "gesendet %lu"),
+            (unsigned long)app->emitted);
     }
     canvas_draw_str(canvas, 2, 62, bottom);
-    canvas_draw_str(canvas, 74, 62, "OK/Back=stop");
+    // Right-aligned so a longer translation never runs off the screen.
+    canvas_draw_str_aligned(
+        canvas, 126, 62, AlignRight, AlignBottom, L("OK/Back=stop", "OK=leallit", "OK=Stopp"));
 }
 
 static bool emu_input_cb(InputEvent* event, void* context) {
@@ -1223,17 +1293,23 @@ static void generate_draw_cb(Canvas* canvas, void* model) {
 
     if(app->gen_result_shown) {
         canvas_set_font(canvas, FontPrimary);
-        draw_centered_trunc(canvas, 28, "Generated");
+        draw_centered_trunc(canvas, 28, L("Generated", "Elkeszult", "Erzeugt"));
         canvas_set_font(canvas, FontSecondary);
         char line[40];
-        snprintf(line, sizeof(line), "%d new, %d total", app->gen_made, app->tag_count);
+        snprintf(
+            line,
+            sizeof(line),
+            L("%d new, %d total", "%d uj, osszesen %d", "%d neu, gesamt %d"),
+            app->gen_made,
+            app->tag_count);
         draw_centered_trunc(canvas, 44, line);
-        canvas_draw_str(canvas, 2, 62, "OK/Back = menu");
+        canvas_draw_str(
+            canvas, 2, 62, L("OK/Back = menu", "OK/Vissza = menu", "OK/Zurueck = Menue"));
         return;
     }
 
     canvas_set_font(canvas, FontPrimary);
-    draw_centered_trunc(canvas, 11, "Generate tags");
+    draw_centered_trunc(canvas, 11, L("Generate tags", "Cimkek keszitese", "Tags erzeugen"));
 
     canvas_set_font(canvas, FontBigNumbers);
     char num[8];
@@ -1243,17 +1319,32 @@ static void generate_draw_cb(Canvas* canvas, void* model) {
 
     canvas_set_font(canvas, FontSecondary);
     char dl[40];
-    snprintf(dl, sizeof(dl), "Data: %s", gen_data_label[app->gen_data]);
+    snprintf(
+        dl,
+        sizeof(dl),
+        L("Data: %s", "Adat: %s", "Daten: %s"),
+        gen_data_label[g_lang][app->gen_data]);
     draw_centered_trunc(canvas, 45, dl);
 
     bool needs_text = (app->gen_data == GenDataText || app->gen_data == GenDataUrl);
     if(needs_text)
-        draw_centered_trunc(canvas, 54, app->gen_text[0] ? app->gen_text : "(empty)");
+        draw_centered_trunc(
+            canvas, 54, app->gen_text[0] ? app->gen_text : L("(empty)", "(ures)", "(leer)"));
     else
-        draw_centered_trunc(canvas, 54, "<> data   ^v count");
+        draw_centered_trunc(
+            canvas,
+            54,
+            L("<> data   ^v count", "<> adat   ^v darab", "<> Daten   ^v Anzahl"));
 
-    canvas_draw_str(canvas, 2, 63, "Back");
-    canvas_draw_str(canvas, 86, 63, needs_text ? "OK=type" : "OK=make");
+    canvas_draw_str(canvas, 2, 63, L("Back", "Vissza", "Zurueck"));
+    canvas_draw_str_aligned(
+        canvas,
+        126,
+        63,
+        AlignRight,
+        AlignBottom,
+        needs_text ? L("OK=type", "OK=beiras", "OK=Eingabe") :
+                     L("OK=make", "OK=keszit", "OK=Erzeugen"));
 }
 
 static bool generate_input_cb(InputEvent* event, void* context) {
@@ -1297,7 +1388,9 @@ static bool generate_input_cb(InputEvent* event, void* context) {
             // Capture the text/URL first, then generate (done in gen_text_done_cb).
             text_input_reset(app->text_input);
             text_input_set_header_text(
-                app->text_input, app->gen_data == GenDataUrl ? "Enter URL" : "Enter text");
+                app->text_input,
+                app->gen_data == GenDataUrl ? L("Enter URL", "URL megadasa", "URL eingeben") :
+                                              L("Enter text", "Szoveg megadasa", "Text eingeben"));
             text_input_set_result_callback(
                 app->text_input, gen_text_done_cb, app, app->gen_text, GEN_TEXT_LEN, false);
             switch_view(app, ViewIdGenText);
@@ -1328,13 +1421,19 @@ static void confirm_draw_cb(Canvas* canvas, void* model) {
     App* app = ((ViewModel*)model)->app;
     canvas_clear(canvas);
     canvas_set_font(canvas, FontPrimary);
-    draw_centered_trunc(canvas, 18, "Delete generated?");
+    draw_centered_trunc(
+        canvas, 18, L("Delete generated?", "Generaltak torlese?", "Erzeugte loeschen?"));
     canvas_set_font(canvas, FontSecondary);
     char line[40];
-    snprintf(line, sizeof(line), "%d GEN-*.nfc file(s)", generated_count(app));
+    snprintf(
+        line,
+        sizeof(line),
+        L("%d GEN-*.nfc file(s)", "%d GEN-*.nfc fajl", "%d GEN-*.nfc Datei(en)"),
+        generated_count(app));
     draw_centered_trunc(canvas, 36, line);
-    canvas_draw_str(canvas, 2, 62, "Back=no");
-    canvas_draw_str(canvas, 86, 62, "OK=yes");
+    canvas_draw_str(canvas, 2, 62, L("Back=no", "Vissza=nem", "Zurueck=nein"));
+    canvas_draw_str_aligned(
+        canvas, 126, 62, AlignRight, AlignBottom, L("OK=yes", "OK=igen", "OK=ja"));
 }
 
 static bool confirm_input_cb(InputEvent* event, void* context) {
@@ -1357,17 +1456,17 @@ static bool confirm_input_cb(InputEvent* event, void* context) {
 
 static void source_value_text(App* app, char* out, size_t n) {
     if(app->src_mode == SrcApp) {
-        strncpy(out, "App", n - 1);
+        strncpy(out, L("App", "App", "App"), n - 1);
         out[n - 1] = '\0';
         return;
     }
     if(app->src_mode == SrcGenerated) {
-        strncpy(out, "Generated", n - 1);
+        strncpy(out, L("Generated", "Generalt", "Erzeugt"), n - 1);
         out[n - 1] = '\0';
         return;
     }
     if(app->source[0] == '\0') {
-        strncpy(out, "Browse", n - 1); // press OK on this row to pick a folder
+        strncpy(out, L("Browse", "Tallozas", "Auswahl"), n - 1); // OK on this row picks a folder
         out[n - 1] = '\0';
         return;
     }
@@ -1375,7 +1474,7 @@ static void source_value_text(App* app, char* out, size_t n) {
     FuriString* name = furi_string_alloc();
     path_extract_filename(p, name, false);
     const char* s = furi_string_get_cstr(name);
-    strncpy(out, s[0] ? s : "folder", n - 1);
+    strncpy(out, s[0] ? s : L("folder", "mappa", "Ordner"), n - 1);
     out[n - 1] = '\0';
     furi_string_free(name);
     furi_string_free(p);
@@ -1449,7 +1548,7 @@ static void mode_changed_cb(VariableItem* item) {
     uint8_t idx = variable_item_get_current_value_index(item);
     if(idx >= ModeCount) idx = 0;
     app->mode = (PlayMode)idx;
-    variable_item_set_current_value_text(item, mode_label[idx]);
+    variable_item_set_current_value_text(item, mode_label[g_lang][idx]);
 }
 
 static void timing_changed_cb(VariableItem* item) {
@@ -1457,7 +1556,7 @@ static void timing_changed_cb(VariableItem* item) {
     uint8_t idx = variable_item_get_current_value_index(item);
     if(idx >= TimingCount) idx = 0;
     app->timing = (TimingMode)idx;
-    variable_item_set_current_value_text(item, timing_label[idx]);
+    variable_item_set_current_value_text(item, timing_label[g_lang][idx]);
     // Delay vs. Codes/period+Period are shown per timing mode; rebuild the list
     // (deferred so we don't mutate it from inside its own change callback).
     view_dispatcher_send_custom_event(app->view_dispatcher, CustomEventRebuildSettings);
@@ -1497,7 +1596,7 @@ static void total_changed_cb(VariableItem* item) {
     if(idx >= TOTAL_COUNT) idx = 0;
     app->total = total_choices[idx];
     if(app->total == 0)
-        variable_item_set_current_value_text(item, "Off");
+        variable_item_set_current_value_text(item, on_off_label[g_lang][0]);
     else {
         char text[8];
         snprintf(text, sizeof(text), "%d", app->total);
@@ -1520,21 +1619,21 @@ static void led_changed_cb(VariableItem* item) {
     uint8_t idx = variable_item_get_current_value_index(item);
     if(idx >= LedCount) idx = 0;
     app->led = (LedMode)idx;
-    variable_item_set_current_value_text(item, led_label[idx]);
+    variable_item_set_current_value_text(item, led_label[g_lang][idx]);
 }
 
 static void vibro_changed_cb(VariableItem* item) {
     App* app = variable_item_get_context(item);
     uint8_t idx = variable_item_get_current_value_index(item) ? 1 : 0;
     app->vibro = idx ? true : false;
-    variable_item_set_current_value_text(item, on_off_label[idx]);
+    variable_item_set_current_value_text(item, on_off_label[g_lang][idx]);
 }
 
 static void beep_changed_cb(VariableItem* item) {
     App* app = variable_item_get_context(item);
     uint8_t idx = variable_item_get_current_value_index(item) ? 1 : 0;
     app->beep = idx ? true : false;
-    variable_item_set_current_value_text(item, on_off_label[idx]);
+    variable_item_set_current_value_text(item, on_off_label[g_lang][idx]);
 }
 
 static void hold_changed_cb(VariableItem* item) {
@@ -1551,7 +1650,7 @@ static void start_delay_changed_cb(VariableItem* item) {
     if(idx > START_DELAY_MAX) idx = 0;
     app->start_delay = idx;
     if(idx == 0) {
-        variable_item_set_current_value_text(item, "Off");
+        variable_item_set_current_value_text(item, on_off_label[g_lang][0]);
     } else {
         char text[8];
         snprintf(text, sizeof(text), "%d s", idx);
@@ -1565,6 +1664,17 @@ static void gap_changed_cb(VariableItem* item) {
     if(idx >= GAP_COUNT) idx = 0;
     app->min_gap_ms = gap_choices[idx];
     variable_item_set_current_value_text(item, gap_labels[idx]);
+}
+
+static void language_changed_cb(VariableItem* item) {
+    App* app = variable_item_get_context(item);
+    uint8_t idx = variable_item_get_current_value_index(item);
+    if(idx >= LANG_COUNT) idx = LANG_EN;
+    g_lang = idx;
+    variable_item_set_current_value_text(item, language_names[idx]);
+    // Every label changes: rebuild the list, the menu and About (deferred, as
+    // the list can't be rebuilt from inside its own change callback).
+    view_dispatcher_send_custom_event(app->view_dispatcher, CustomEventLanguage);
 }
 
 static void settings_enter_cb(void* context, uint32_t index) {
@@ -1617,6 +1727,14 @@ static bool custom_event_cb(void* context, uint32_t event) {
         variable_item_list_set_selected_item(app->settings_list, RowTiming);
         return true;
     }
+    if(event == CustomEventLanguage) {
+        settings_populate(app);
+        variable_item_list_set_selected_item(app->settings_list, RowLanguage);
+        menu_populate(app);
+        submenu_set_selected_item(app->menu, MenuIndexSettings); // Back returns here
+        about_populate(app);
+        return true;
+    }
     return false;
 }
 
@@ -1638,23 +1756,30 @@ static int index_of_u16(const uint16_t* arr, size_t n, uint16_t v) {
 static void settings_populate(App* app) {
     VariableItemList* l = app->settings_list;
     variable_item_list_reset(l);
-    variable_item_list_set_header(l, "Settings");
+    variable_item_list_set_header(l, L("Settings", "Beallitasok", "Einstellungen"));
     char text[8];
     uint8_t row = 0;
 
-    app->item_mode = variable_item_list_add(l, "Order", ModeCount, mode_changed_cb, app);
-    variable_item_set_current_value_index(app->item_mode, app->mode);
-    variable_item_set_current_value_text(app->item_mode, mode_label[app->mode]);
+    // First row, so it is easy to find in a language you don't read.
+    VariableItem* it_lang = variable_item_list_add(
+        l, L("Language", "Nyelv", "Sprache"), LANG_COUNT, language_changed_cb, app);
+    variable_item_set_current_value_index(it_lang, g_lang);
+    variable_item_set_current_value_text(it_lang, language_names[g_lang]);
     row++;
 
-    app->item_timing = variable_item_list_add(l, "Timing", TimingCount, timing_changed_cb, app);
+    app->item_mode = variable_item_list_add(l, L("Order", "Sorrend", "Reihenfolge"), ModeCount, mode_changed_cb, app);
+    variable_item_set_current_value_index(app->item_mode, app->mode);
+    variable_item_set_current_value_text(app->item_mode, mode_label[g_lang][app->mode]);
+    row++;
+
+    app->item_timing = variable_item_list_add(l, L("Timing", "Idozites", "Zeitmodus"), TimingCount, timing_changed_cb, app);
     variable_item_set_current_value_index(app->item_timing, app->timing);
-    variable_item_set_current_value_text(app->item_timing, timing_label[app->timing]);
+    variable_item_set_current_value_text(app->item_timing, timing_label[g_lang][app->timing]);
     row++;
 
     if(app->timing == TimingFixed) {
         app->item_delay = variable_item_list_add(
-            l, "Delay", INTERVAL_MAX - INTERVAL_MIN + 1, delay_changed_cb, app);
+            l, L("Delay", "Idokoz", "Intervall"), INTERVAL_MAX - INTERVAL_MIN + 1, delay_changed_cb, app);
         variable_item_set_current_value_index(app->item_delay, app->interval - INTERVAL_MIN);
         snprintf(text, sizeof(text), "%d s", app->interval);
         variable_item_set_current_value_text(app->item_delay, text);
@@ -1663,12 +1788,12 @@ static void settings_populate(App* app) {
         app->item_period = NULL;
     } else {
         app->item_per_period = variable_item_list_add(
-            l, "Codes/period", PER_PERIOD_MAX - PER_PERIOD_MIN + 1, per_period_changed_cb, app);
+            l, L("Codes/period", "Kod/periodus", "Codes/Periode"), PER_PERIOD_MAX - PER_PERIOD_MIN + 1, per_period_changed_cb, app);
         variable_item_set_current_value_index(app->item_per_period, app->per_period - PER_PERIOD_MIN);
         snprintf(text, sizeof(text), "%d", app->per_period);
         variable_item_set_current_value_text(app->item_per_period, text);
         row++;
-        app->item_period = variable_item_list_add(l, "Period", PERIOD_COUNT, period_changed_cb, app);
+        app->item_period = variable_item_list_add(l, L("Period", "Periodus", "Periode"), PERIOD_COUNT, period_changed_cb, app);
         variable_item_set_current_value_index(
             app->item_period, index_of_u16(period_choices, PERIOD_COUNT, app->period_s));
         snprintf(text, sizeof(text), "%d s", app->period_s);
@@ -1676,7 +1801,7 @@ static void settings_populate(App* app) {
         row++;
 
         int gi = index_of_u16(gap_choices, GAP_COUNT, app->min_gap_ms);
-        VariableItem* it_gap = variable_item_list_add(l, "Min gap", GAP_COUNT, gap_changed_cb, app);
+        VariableItem* it_gap = variable_item_list_add(l, L("Min gap", "Min. szunet", "Min. Abstand"), GAP_COUNT, gap_changed_cb, app);
         variable_item_set_current_value_index(it_gap, gi);
         variable_item_set_current_value_text(it_gap, gap_labels[gi]);
         row++;
@@ -1684,16 +1809,16 @@ static void settings_populate(App* app) {
     }
 
     int hi = index_of_u16(hold_choices, HOLD_COUNT, app->hold_ms);
-    VariableItem* it_hold = variable_item_list_add(l, "Hold", HOLD_COUNT, hold_changed_cb, app);
+    VariableItem* it_hold = variable_item_list_add(l, L("Hold", "Tartas", "Haltezeit"), HOLD_COUNT, hold_changed_cb, app);
     variable_item_set_current_value_index(it_hold, hi);
     variable_item_set_current_value_text(it_hold, hold_labels[hi]);
     row++;
 
-    app->item_total = variable_item_list_add(l, "Total", TOTAL_COUNT, total_changed_cb, app);
+    app->item_total = variable_item_list_add(l, L("Total", "Osszesen", "Gesamt"), TOTAL_COUNT, total_changed_cb, app);
     variable_item_set_current_value_index(
         app->item_total, index_of_u16(total_choices, TOTAL_COUNT, app->total));
     if(app->total == 0)
-        variable_item_set_current_value_text(app->item_total, "Off");
+        variable_item_set_current_value_text(app->item_total, on_off_label[g_lang][0]);
     else {
         snprintf(text, sizeof(text), "%d", app->total);
         variable_item_set_current_value_text(app->item_total, text);
@@ -1702,27 +1827,27 @@ static void settings_populate(App* app) {
 
     app->source_row = row;
     app->item_source =
-        variable_item_list_add(l, "Source", SrcCount, source_changed_cb, app);
+        variable_item_list_add(l, L("Source", "Forras", "Quelle"), SrcCount, source_changed_cb, app);
     set_source_item_text(app);
     row++;
 
     app->item_led = variable_item_list_add(l, "LED", LedCount, led_changed_cb, app);
     variable_item_set_current_value_index(app->item_led, app->led);
-    variable_item_set_current_value_text(app->item_led, led_label[app->led]);
+    variable_item_set_current_value_text(app->item_led, led_label[g_lang][app->led]);
 
-    VariableItem* it_vibro = variable_item_list_add(l, "Vibro", 2, vibro_changed_cb, app);
+    VariableItem* it_vibro = variable_item_list_add(l, L("Vibro", "Rezges", "Vibration"), 2, vibro_changed_cb, app);
     variable_item_set_current_value_index(it_vibro, app->vibro ? 1 : 0);
-    variable_item_set_current_value_text(it_vibro, on_off_label[app->vibro ? 1 : 0]);
+    variable_item_set_current_value_text(it_vibro, on_off_label[g_lang][app->vibro ? 1 : 0]);
 
-    VariableItem* it_beep = variable_item_list_add(l, "Beep", 2, beep_changed_cb, app);
+    VariableItem* it_beep = variable_item_list_add(l, L("Beep", "Hang", "Ton"), 2, beep_changed_cb, app);
     variable_item_set_current_value_index(it_beep, app->beep ? 1 : 0);
-    variable_item_set_current_value_text(it_beep, on_off_label[app->beep ? 1 : 0]);
+    variable_item_set_current_value_text(it_beep, on_off_label[g_lang][app->beep ? 1 : 0]);
 
     VariableItem* it_sd = variable_item_list_add(
-        l, "Start delay", START_DELAY_MAX + 1, start_delay_changed_cb, app);
+        l, L("Start delay", "Kesleltetes", "Vorlauf"), START_DELAY_MAX + 1, start_delay_changed_cb, app);
     variable_item_set_current_value_index(it_sd, app->start_delay);
     if(app->start_delay == 0) {
-        variable_item_set_current_value_text(it_sd, "Off");
+        variable_item_set_current_value_text(it_sd, on_off_label[g_lang][0]);
     } else {
         snprintf(text, sizeof(text), "%d s", app->start_delay);
         variable_item_set_current_value_text(it_sd, text);
@@ -1731,8 +1856,8 @@ static void settings_populate(App* app) {
     variable_item_list_set_enter_callback(l, settings_enter_cb, app);
 }
 
-static void build_about(App* app) {
-    app->about = widget_alloc();
+static void about_populate(App* app) {
+    widget_reset(app->about);
     widget_add_string_element(app->about, 64, 4, AlignCenter, AlignTop, FontPrimary, APP_NAME);
     widget_add_string_multiline_element(
         app->about,
@@ -1741,10 +1866,43 @@ static void build_about(App* app) {
         AlignLeft,
         AlignTop,
         FontSecondary,
-        "NFC reader / access test.\n"
-        "Cycles saved .nfc tags,\n"
-        "fixed or random timing.\n"
-        "v0.7  Athos / RSC");
+        L("NFC reader / access test.\n"
+          "Cycles saved .nfc tags,\n"
+          "fixed or random timing.\n"
+          "v0.8  Athos / RSC",
+          "NFC olvaso / belepteto\n"
+          "teszt, .nfc cimkekkel.\n"
+          "Fix/veletlen idozites.\n"
+          "v0.8  Athos / RSC",
+          "NFC-Leser-/Zutrittstest.\n"
+          "Spielt .nfc-Tags ab, fest\n"
+          "oder zufaellig getaktet.\n"
+          "v0.8  Athos / RSC"));
+}
+
+static void menu_populate(App* app) {
+    submenu_reset(app->menu);
+    submenu_set_header(app->menu, APP_NAME);
+    submenu_add_item(app->menu, L("Start", "Inditas", "Start"), MenuIndexStart, menu_cb, app);
+    submenu_add_item(
+        app->menu,
+        L("Settings", "Beallitasok", "Einstellungen"),
+        MenuIndexSettings,
+        menu_cb,
+        app);
+    submenu_add_item(
+        app->menu,
+        L("Generate tags", "Cimkek keszitese", "Tags erzeugen"),
+        MenuIndexGenerate,
+        menu_cb,
+        app);
+    submenu_add_item(
+        app->menu,
+        L("Delete generated", "Generaltak torlese", "Erzeugte loeschen"),
+        MenuIndexDeleteGen,
+        menu_cb,
+        app);
+    submenu_add_item(app->menu, L("About", "Nevjegy", "Info"), MenuIndexAbout, menu_cb, app);
 }
 
 static View* make_custom_view(App* app, ViewDrawCallback draw, ViewInputCallback input) {
@@ -1780,12 +1938,7 @@ static App* app_alloc(void) {
     view_dispatcher_set_navigation_event_callback(app->view_dispatcher, navigation_cb);
 
     app->menu = submenu_alloc();
-    submenu_set_header(app->menu, APP_NAME);
-    submenu_add_item(app->menu, "Start", MenuIndexStart, menu_cb, app);
-    submenu_add_item(app->menu, "Settings", MenuIndexSettings, menu_cb, app);
-    submenu_add_item(app->menu, "Generate tags", MenuIndexGenerate, menu_cb, app);
-    submenu_add_item(app->menu, "Delete generated", MenuIndexDeleteGen, menu_cb, app);
-    submenu_add_item(app->menu, "About", MenuIndexAbout, menu_cb, app);
+    menu_populate(app);
     view_dispatcher_add_view(app->view_dispatcher, ViewIdMenu, submenu_get_view(app->menu));
 
     app->settings_list = variable_item_list_alloc();
@@ -1806,7 +1959,8 @@ static App* app_alloc(void) {
     view_dispatcher_add_view(
         app->view_dispatcher, ViewIdGenText, text_input_get_view(app->text_input));
 
-    build_about(app);
+    app->about = widget_alloc();
+    about_populate(app);
     view_dispatcher_add_view(app->view_dispatcher, ViewIdAbout, widget_get_view(app->about));
 
     view_dispatcher_attach_to_gui(app->view_dispatcher, app->gui, ViewDispatcherTypeFullscreen);
